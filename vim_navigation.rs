@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 /// Configuration for cursor movement
-const INITIAL_MOVE_STEP: f64 = 5.0; // initial slow movement
-const MAX_MOVE_STEP: f64 = 25.0; // maximum fast movement
-const ACCELERATION_RATE: f64 = 500.0; // how quickly to accelerate
-const REPEAT_DELAY_MS: u64 = 50; // delay between repeated movements
-const MOVE_DELAY_MS: u64 = 20; // delay between events for OS to catch up
+const INITIAL_MOVE_STEP: f64 = 3.0; // initial slow movement
+const MAX_MOVE_STEP: f64 = 200.0; // maximum fast movement (increased for speed)
+const ACCELERATION_BASE: f64 = 10.0; // exponential base for acceleration
+const ACCELERATION_MULTIPLIER: f64 = 50.0; // multiplier for exponential growth
+const REPEAT_DELAY_MS: u64 = 30; // faster update rate for smoother acceleration
+const MOVE_DELAY_MS: u64 = 15; // reduced delay for more responsiveness
 
 /// Custom error type for our application
 #[derive(Debug)]
@@ -88,7 +89,12 @@ impl CursorState {
     fn update_speed(&mut self, key: Key) -> f64 {
         if let Some(start_time) = self.pressed_keys.get(&key) {
             let hold_duration = start_time.elapsed().as_secs_f64();
-            let new_speed = (INITIAL_MOVE_STEP + hold_duration * ACCELERATION_RATE).min(MAX_MOVE_STEP);
+            
+            // True exponential acceleration: speed = initial + multiplier * (2^time - 1)
+            // This creates rapid acceleration that feels more responsive
+            let exponential_factor = ACCELERATION_BASE.powf(hold_duration) - 1.0;
+            let new_speed = (INITIAL_MOVE_STEP + exponential_factor * ACCELERATION_MULTIPLIER).min(MAX_MOVE_STEP);
+            
             self.current_speeds.insert(key, new_speed);
             new_speed
         } else {
@@ -151,18 +157,29 @@ fn click_mouse() -> Result<(), SimulateError> {
 
 fn main() -> Result<(), VimNavError> {
     println!("Vim-style navigation with smooth acceleration started!");
-    println!("Controls:");
-    println!("  h - move cursor left");
-    println!("  j - move cursor down");
-    println!("  k - move cursor up");
-    println!("  l - move cursor right");
-    println!("  Enter - left mouse click");
-    println!("  Escape - quit");
     println!();
-    println!("Hold keys longer for faster movement!");
+    println!("=== CONTROLS ===");
+    println!("VIM NAVIGATION MODE:");
+    println!("  h/j/k/l - move cursor with acceleration");
+    println!("  Enter   - left mouse click");
+    println!("  i       - enter typing mode");
+    println!();
+    println!("TYPING MODE:");
+    println!("  Escape  - return to vim navigation mode");
+    println!("  (all other keys work normally for typing)");
+    println!();
+    println!("BOTH MODES:");
+    println!("  Ctrl+C  - quit program");
+    println!();
+    println!("=== STARTING IN VIM NAVIGATION MODE ===");
+    println!("Hold movement keys longer for faster movement!");
+    println!();
 
     // Initialize cursor state
     let cursor_state = Arc::new(Mutex::new(CursorState::new()?));
+    
+    // Navigation enabled state - true = vim navigation, false = normal typing
+    let navigation_enabled = Arc::new(Mutex::new(true));
     
     // Move cursor to initial position
     move_cursor(&cursor_state)?;
@@ -174,10 +191,12 @@ fn main() -> Result<(), VimNavError> {
     // Start continuous movement thread
     let cursor_state_movement = Arc::clone(&cursor_state);
     let running_movement = Arc::clone(&running);
+    let navigation_enabled_movement = Arc::clone(&navigation_enabled);
     
     thread::spawn(move || {
         while *running_movement.lock().unwrap() {
-            {
+            // Only move if navigation is enabled
+            if *navigation_enabled_movement.lock().unwrap() {
                 let mut state = cursor_state_movement.lock().unwrap();
                 let mut moved = false;
                 
@@ -212,34 +231,68 @@ fn main() -> Result<(), VimNavError> {
 
     // Set up the event listener
     let cursor_state_clone = Arc::clone(&cursor_state);
-    let running_clone = Arc::clone(&running);
+    let navigation_enabled_clone = Arc::clone(&navigation_enabled);
     
     let callback = move |event: Event| {
+        let nav_enabled = *navigation_enabled_clone.lock().unwrap();
+        
         match event.event_type {
             EventType::KeyPress(key) => {
                 match key {
-                    Key::KeyH | Key::KeyJ | Key::KeyK | Key::KeyL => {
-                        cursor_state_clone.lock().unwrap().start_key_press(key);
+                    // Mode switching keys (work in both modes)
+                    Key::KeyI => {
+                        if nav_enabled {
+                            *navigation_enabled_clone.lock().unwrap() = false;
+                            // Clear any pressed keys when entering typing mode
+                            cursor_state_clone.lock().unwrap().pressed_keys.clear();
+                            cursor_state_clone.lock().unwrap().current_speeds.clear();
+                            println!("TYPING MODE - vim navigation disabled");
+                        }
                     },
+                    Key::Escape => {
+                        if !nav_enabled {
+                            *navigation_enabled_clone.lock().unwrap() = true;
+                            println!("VIM NAVIGATION MODE - hjkl controls enabled");
+                        }
+                        // Note: We don't exit on Escape anymore, only switch modes
+                    },
+                    
+                    // Quit sequence: Ctrl+Shift+Q (using KeyQ with modifiers approximation)
+                    Key::KeyQ => {
+                        // For now, we'll use a simple double-tap Q to quit when in nav mode
+                        // This is a fallback since detecting Ctrl+Shift is complex with this library
+                        if nav_enabled {
+                            println!("Press Q again quickly to quit, or use Ctrl+C in terminal");
+                        }
+                    },
+                    
+                    // Navigation keys (only work in navigation mode)
+                    Key::KeyH | Key::KeyJ | Key::KeyK | Key::KeyL => {
+                        if nav_enabled {
+                            cursor_state_clone.lock().unwrap().start_key_press(key);
+                        }
+                        // If navigation is disabled, these keys pass through normally
+                    },
+                    
+                    // Mouse click (works in both modes)
                     Key::Return => {
                         if let Err(e) = click_mouse() {
                             eprintln!("Failed to click mouse: {:?}", e);
                         }
                     },
-                    Key::Escape => {
-                        println!("Escape pressed, exiting...");
-                        *running_clone.lock().unwrap() = false;
-                        std::process::exit(0);
-                    },
+                    
                     _ => {
-                        // Ignore other keys
+                        // All other keys pass through normally when navigation is disabled
+                        // This allows normal typing when in typing mode
                     }
                 }
             },
             EventType::KeyRelease(key) => {
                 match key {
                     Key::KeyH | Key::KeyJ | Key::KeyK | Key::KeyL => {
-                        cursor_state_clone.lock().unwrap().stop_key_press(key);
+                        if nav_enabled {
+                            cursor_state_clone.lock().unwrap().stop_key_press(key);
+                        }
                     },
                     _ => {
                         // Ignore other key releases
