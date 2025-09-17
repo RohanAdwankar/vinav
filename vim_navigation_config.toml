@@ -1,6 +1,6 @@
-initial_move_step = 0.005
-acceleration_base = 2.0
-acceleration_multiplier = 50.0
+initial_move_step = 0.0005
+acceleration_base = 1.0
+acceleration_multiplier = 30.0
 repeat_delay_ms = 20
 move_delay_ms = 15
 precision_divisor = 100.0
@@ -13,7 +13,7 @@ key_right = "l"
 
 # Control keys
 key_click = "return"
-key_toggle_mode = "escape"
+key_toggle_mode = "command+shift+s"
 key_right_click = "i"
 key_select_toggle = "v"
 key_goto_top = "g"

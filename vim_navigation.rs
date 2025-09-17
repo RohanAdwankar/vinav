@@ -9,6 +9,16 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Represents a key combination with modifiers
+#[derive(Debug, Clone, PartialEq)]
+struct KeyCombination {
+    key: Key,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    cmd: bool, // Meta/Command key on macOS
+}
+
 /// Configuration structure for vim navigation
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct VimNavConfig {
@@ -34,11 +44,11 @@ struct VimNavConfig {
     pub key_click: String,
     pub key_toggle_mode: String, // Single key to toggle between nav/typing modes
     pub key_right_click: String,
-    pub key_select_toggle: String,  // Toggle text selection mode
-    pub key_goto_top: String,       // Go to top of screen (gg equivalent)
-    pub key_goto_bottom: String,    // Go to bottom of screen (G equivalent)
-    pub key_yank: String,           // Copy/yank (y key)
-    pub key_paste: String,          // Paste (p key)
+    pub key_select_toggle: String, // Toggle text selection mode
+    pub key_goto_top: String,      // Go to top of screen (gg equivalent)
+    pub key_goto_bottom: String,   // Go to bottom of screen (G equivalent)
+    pub key_yank: String,          // Copy/yank (y key)
+    pub key_paste: String,         // Paste (p key)
 }
 
 impl Default for VimNavConfig {
@@ -50,13 +60,13 @@ impl Default for VimNavConfig {
             acceleration_multiplier: 50.0, // Double the multiplier for faster acceleration
             repeat_delay_ms: 30,
             move_delay_ms: 15,
-            precision_divisor: 100.0,  // 100x slower by default
+            precision_divisor: 50.0, // 100x slower by default
             key_left: "h".to_string(),
             key_down: "j".to_string(),
             key_up: "k".to_string(),
             key_right: "l".to_string(),
             key_click: "return".to_string(),
-            key_toggle_mode: "escape".to_string(),
+            key_toggle_mode: "command+shift+s".to_string(),
             key_right_click: "i".to_string(),
             key_select_toggle: "v".to_string(),
             key_goto_top: "g".to_string(),
@@ -94,6 +104,57 @@ impl VimNavConfig {
         }
     }
 
+    /// Parse a key combination string like "command+shift+s" into a KeyCombination
+    fn parse_key_combination(&self, key_str: &str) -> Option<KeyCombination> {
+        let parts: Vec<&str> = key_str.split('+').collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut shift = false;
+        let mut cmd = false;
+        let mut main_key = None;
+
+        for part in parts {
+            match part.to_lowercase().as_str() {
+                "ctrl" | "control" => ctrl = true,
+                "alt" | "option" => alt = true,
+                "shift" => shift = true,
+                "cmd" | "command" | "meta" => cmd = true,
+                key_name => {
+                    if let Some(key) = self.string_to_key(key_name) {
+                        main_key = Some(key);
+                    }
+                }
+            }
+        }
+
+        if let Some(key) = main_key {
+            Some(KeyCombination {
+                key,
+                ctrl,
+                alt,
+                shift,
+                cmd,
+            })
+        } else {
+            // If no main key found, try parsing as a single key
+            if let Some(key) = self.string_to_key(key_str) {
+                Some(KeyCombination {
+                    key,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                    cmd: false,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
     fn print_config(&self) {
         println!("=== Current Configuration ===");
         println!("Initial speed: {:.1} px", self.initial_move_step);
@@ -117,6 +178,17 @@ impl VimNavConfig {
             "Control keys: {} (toggle mode), {} (click)",
             self.key_toggle_mode, self.key_click
         );
+        
+        // Test key combination parsing
+        if let Some(toggle_combo) = self.parse_key_combination(&self.key_toggle_mode) {
+            println!("Toggle key combination parsed successfully:");
+            println!("  Key: {:?}, Ctrl: {}, Alt: {}, Shift: {}, Cmd: {}", 
+                     toggle_combo.key, toggle_combo.ctrl, toggle_combo.alt, 
+                     toggle_combo.shift, toggle_combo.cmd);
+        } else {
+            println!("Failed to parse toggle key combination: {}", self.key_toggle_mode);
+        }
+        
         println!();
     }
 
@@ -141,10 +213,43 @@ impl VimNavConfig {
             "v" => Some(Key::KeyV),
             "y" => Some(Key::KeyY),
             "p" => Some(Key::KeyP),
+            "b" => Some(Key::KeyB),
+            "c" => Some(Key::KeyC),
+            "m" => Some(Key::KeyM),
+            "n" => Some(Key::KeyN),
+            "o" => Some(Key::KeyO),
+            "q" => Some(Key::KeyQ),
+            "u" => Some(Key::KeyU),
+            "x" => Some(Key::KeyX),
+            "z" => Some(Key::KeyZ),
+            "1" => Some(Key::Num1),
+            "2" => Some(Key::Num2),
+            "3" => Some(Key::Num3),
+            "4" => Some(Key::Num4),
+            "5" => Some(Key::Num5),
+            "6" => Some(Key::Num6),
+            "7" => Some(Key::Num7),
+            "8" => Some(Key::Num8),
+            "9" => Some(Key::Num9),
+            "0" => Some(Key::Num0),
             "shift_g" => Some(Key::KeyG), // We'll handle shift detection separately
             "space" => Some(Key::Space),
+            "tab" => Some(Key::Tab),
+            "backspace" => Some(Key::Backspace),
+            "delete" => Some(Key::Delete),
             _ => None,
         }
+    }
+
+    /// Check if the current modifier state matches a key combination for the given pressed key
+    fn matches_key_combination(&self, key_combo: &KeyCombination, pressed_key: Key, 
+                                shift_pressed: bool, ctrl_pressed: bool, 
+                                alt_pressed: bool, cmd_pressed: bool) -> bool {
+        key_combo.key == pressed_key
+            && key_combo.shift == shift_pressed
+            && key_combo.ctrl == ctrl_pressed
+            && key_combo.alt == alt_pressed
+            && key_combo.cmd == cmd_pressed
     }
 }
 
@@ -207,7 +312,10 @@ struct CursorState {
     current_speeds: HashMap<Key, f64>,
     // Modifier tracking
     shift_pressed: bool,
-    space_pressed: bool, // For precision mode (100x slower)
+    ctrl_pressed: bool,
+    alt_pressed: bool,
+    cmd_pressed: bool,
+    space_pressed: bool,    // For precision mode (100x slower)
     selection_active: bool, // For text selection mode
     // Configuration
     config: VimNavConfig,
@@ -224,6 +332,9 @@ impl CursorState {
             pressed_keys: HashMap::new(),
             current_speeds: HashMap::new(),
             shift_pressed: false,
+            ctrl_pressed: false,
+            alt_pressed: false,
+            cmd_pressed: false,
             space_pressed: false,
             selection_active: false,
             config,
@@ -395,7 +506,7 @@ fn right_click_mouse(config: &VimNavConfig) -> Result<(), SimulateError> {
 fn toggle_selection(cursor_state: &Arc<Mutex<CursorState>>) -> Result<(), SimulateError> {
     let mut state = cursor_state.lock().unwrap();
     state.selection_active = !state.selection_active;
-    
+
     if state.selection_active {
         // Start selection by pressing left mouse button
         simulate(&EventType::ButtonPress(Button::Left))?;
@@ -408,7 +519,10 @@ fn toggle_selection(cursor_state: &Arc<Mutex<CursorState>>) -> Result<(), Simula
     Ok(())
 }
 
-fn goto_screen_edge(cursor_state: &Arc<Mutex<CursorState>>, go_to_top: bool) -> Result<(), SimulateError> {
+fn goto_screen_edge(
+    cursor_state: &Arc<Mutex<CursorState>>,
+    go_to_top: bool,
+) -> Result<(), SimulateError> {
     let mut state = cursor_state.lock().unwrap();
     if go_to_top {
         state.y = 0.0;
@@ -418,14 +532,14 @@ fn goto_screen_edge(cursor_state: &Arc<Mutex<CursorState>>, go_to_top: bool) -> 
         println!("Moved to bottom of screen");
     }
     drop(state);
-    
+
     // Actually move the cursor
     let state = cursor_state.lock().unwrap();
     let x = state.x;
     let y = state.y;
     let config = state.config.clone();
     drop(state);
-    
+
     send_event(&EventType::MouseMove { x, y }, &config)?;
     Ok(())
 }
@@ -471,7 +585,10 @@ fn main() -> Result<(), VimNavError> {
     println!("  {} - yank/copy", config.key_yank);
     println!("  {} - paste", config.key_paste);
     println!("  Shift+hjkl - scroll in respective directions");
-    println!("  Space+hjkl - precision mode ({:.0}x slower)", config.precision_divisor);
+    println!(
+        "  Space+hjkl - precision mode ({:.0}x slower)",
+        config.precision_divisor
+    );
     println!("  {} - toggle to typing mode", config.key_toggle_mode);
     println!();
     println!("TYPING MODE:");
@@ -567,33 +684,44 @@ fn main() -> Result<(), VimNavError> {
         match event.event_type {
             EventType::KeyPress(key) => {
                 // Track modifier states
-                if key == Key::ShiftLeft || key == Key::ShiftRight {
-                    cursor_state_clone.lock().unwrap().shift_pressed = true;
+                let mut state = cursor_state_clone.lock().unwrap();
+                match key {
+                    Key::ShiftLeft | Key::ShiftRight => state.shift_pressed = true,
+                    Key::ControlLeft | Key::ControlRight => state.ctrl_pressed = true,
+                    Key::Alt => state.alt_pressed = true,
+                    Key::MetaLeft | Key::MetaRight => state.cmd_pressed = true,
+                    Key::Space => state.space_pressed = true,
+                    _ => {}
                 }
-                if key == Key::Space {
-                    cursor_state_clone.lock().unwrap().space_pressed = true;
-                }
+                drop(state); // Release the lock
 
-                // Mode switching - single toggle key works in both modes
-                if key
-                    == config_clone
-                        .string_to_key(&config_clone.key_toggle_mode)
-                        .unwrap_or(Key::Escape)
-                {
-                    let mut nav_enabled_guard = navigation_enabled_clone.lock().unwrap();
-                    *nav_enabled_guard = !*nav_enabled_guard;
-                    if *nav_enabled_guard {
-                        println!("VIM NAVIGATION MODE - navigation enabled");
-                    } else {
-                        println!("TYPING MODE - navigation disabled");
-                        // Clear any pressed keys when entering typing mode
-                        cursor_state_clone.lock().unwrap().pressed_keys.clear();
-                        cursor_state_clone.lock().unwrap().current_speeds.clear();
+                // Get current modifier states for key combination checking
+                let state = cursor_state_clone.lock().unwrap();
+                let shift_pressed = state.shift_pressed;
+                let ctrl_pressed = state.ctrl_pressed;
+                let alt_pressed = state.alt_pressed;
+                let cmd_pressed = state.cmd_pressed;
+                drop(state);
+
+                // Mode switching - check for key combination
+                if let Some(toggle_combo) = config_clone.parse_key_combination(&config_clone.key_toggle_mode) {
+                    if config_clone.matches_key_combination(&toggle_combo, key, shift_pressed, ctrl_pressed, alt_pressed, cmd_pressed) {
+                        let mut nav_enabled_guard = navigation_enabled_clone.lock().unwrap();
+                        *nav_enabled_guard = !*nav_enabled_guard;
+                        if *nav_enabled_guard {
+                            println!("VIM NAVIGATION MODE - navigation enabled");
+                        } else {
+                            println!("TYPING MODE - navigation disabled");
+                            // Clear any pressed keys when entering typing mode
+                            cursor_state_clone.lock().unwrap().pressed_keys.clear();
+                            cursor_state_clone.lock().unwrap().current_speeds.clear();
+                        }
+                        return None; // Block this key
                     }
-                    return None; // Block this key
+                }
 
                 // Navigation keys (only work in navigation mode)
-                } else if nav_enabled
+                if nav_enabled
                     && (key
                         == config_clone
                             .string_to_key(&config_clone.key_left)
@@ -666,7 +794,7 @@ fn main() -> Result<(), VimNavError> {
                         eprintln!("Failed to click mouse: {:?}", e);
                     }
                     return None; // Block this key
-                
+
                 // Right mouse click (only works in navigation mode)
                 } else if nav_enabled
                     && key
@@ -678,7 +806,7 @@ fn main() -> Result<(), VimNavError> {
                         eprintln!("Failed to right click mouse: {:?}", e);
                     }
                     return None; // Block this key
-                
+
                 // Toggle text selection (only works in navigation mode)
                 } else if nav_enabled
                     && key
@@ -690,33 +818,35 @@ fn main() -> Result<(), VimNavError> {
                         eprintln!("Failed to toggle selection: {:?}", e);
                     }
                     return None; // Block this key
-                
+
                 // Go to top of screen (only works in navigation mode)
                 } else if nav_enabled
                     && key
                         == config_clone
                             .string_to_key(&config_clone.key_goto_top)
                             .unwrap_or(Key::KeyG)
-                    && !cursor_state_clone.lock().unwrap().shift_pressed // Plain G, not Shift+G
+                    && !cursor_state_clone.lock().unwrap().shift_pressed
+                // Plain G, not Shift+G
                 {
                     if let Err(e) = goto_screen_edge(&cursor_state_clone, true) {
                         eprintln!("Failed to go to top: {:?}", e);
                     }
                     return None; // Block this key
-                
+
                 // Go to bottom of screen (only works in navigation mode)
                 } else if nav_enabled
                     && key
                         == config_clone
                             .string_to_key(&config_clone.key_goto_bottom)
                             .unwrap_or(Key::KeyG)
-                    && cursor_state_clone.lock().unwrap().shift_pressed // Shift+G
+                    && cursor_state_clone.lock().unwrap().shift_pressed
+                // Shift+G
                 {
                     if let Err(e) = goto_screen_edge(&cursor_state_clone, false) {
                         eprintln!("Failed to go to bottom: {:?}", e);
                     }
                     return None; // Block this key
-                
+
                 // Yank/copy (only works in navigation mode)
                 } else if nav_enabled
                     && key
@@ -728,7 +858,7 @@ fn main() -> Result<(), VimNavError> {
                         eprintln!("Failed to yank/copy: {:?}", e);
                     }
                     return None; // Block this key
-                
+
                 // Paste (only works in navigation mode)
                 } else if nav_enabled
                     && key
@@ -740,7 +870,7 @@ fn main() -> Result<(), VimNavError> {
                         eprintln!("Failed to paste: {:?}", e);
                     }
                     return None; // Block this key
-                
+
                 // Block space key in navigation mode (used for precision mode)
                 } else if nav_enabled && key == Key::Space {
                     return None; // Block space from reaching other apps
@@ -752,12 +882,16 @@ fn main() -> Result<(), VimNavError> {
             }
             EventType::KeyRelease(key) => {
                 // Track modifier states
-                if key == Key::ShiftLeft || key == Key::ShiftRight {
-                    cursor_state_clone.lock().unwrap().shift_pressed = false;
+                let mut state = cursor_state_clone.lock().unwrap();
+                match key {
+                    Key::ShiftLeft | Key::ShiftRight => state.shift_pressed = false,
+                    Key::ControlLeft | Key::ControlRight => state.ctrl_pressed = false,
+                    Key::Alt => state.alt_pressed = false,
+                    Key::MetaLeft | Key::MetaRight => state.cmd_pressed = false,
+                    Key::Space => state.space_pressed = false,
+                    _ => {}
                 }
-                if key == Key::Space {
-                    cursor_state_clone.lock().unwrap().space_pressed = false;
-                }
+                drop(state);
 
                 if nav_enabled
                     && (key
@@ -780,7 +914,7 @@ fn main() -> Result<(), VimNavError> {
                     cursor_state_clone.lock().unwrap().stop_key_press(key);
                     return None; // Block this key release too
                 }
-                
+
                 // Block space key release in navigation mode
                 if nav_enabled && key == Key::Space {
                     return None; // Block space release from reaching other apps
@@ -806,4 +940,3 @@ fn main() -> Result<(), VimNavError> {
 
     Ok(())
 }
-
