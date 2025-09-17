@@ -12,5 +12,4 @@ key_right = "l"
 
 # Control keys
 key_click = "return"
-key_insert_mode = "i"
-key_nav_mode = "escape"
+key_toggle_mode = "escape"

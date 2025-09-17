@@ -1,10 +1,13 @@
-use rdev::{simulate, display_size, Event, EventType, Key, Button, SimulateError, DisplayError, GrabError, grab};
+use config::{Config, ConfigError, File};
+use rdev::{
+    display_size, grab, simulate, Button, DisplayError, Event, EventType, GrabError, Key,
+    SimulateError,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use config::{Config, ConfigError, File};
-use serde::{Deserialize, Serialize};
 
 /// Configuration structure for vim navigation
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -27,17 +30,16 @@ struct VimNavConfig {
     pub key_up: String,
     pub key_right: String,
     pub key_click: String,
-    pub key_insert_mode: String,
-    pub key_nav_mode: String,
+    pub key_toggle_mode: String, // Single key to toggle between nav/typing modes
 }
 
 impl Default for VimNavConfig {
     fn default() -> Self {
         Self {
-            initial_move_step: 1.0,  // Half the previous speed
-            max_move_step: None, // No speed limit by default!
+            initial_move_step: 1.0, // Half the previous speed
+            max_move_step: None,    // No speed limit by default!
             acceleration_base: 2.0,
-            acceleration_multiplier: 50.0,  // Double the multiplier for faster acceleration
+            acceleration_multiplier: 50.0, // Double the multiplier for faster acceleration
             repeat_delay_ms: 30,
             move_delay_ms: 15,
             key_left: "h".to_string(),
@@ -45,8 +47,7 @@ impl Default for VimNavConfig {
             key_up: "k".to_string(),
             key_right: "l".to_string(),
             key_click: "return".to_string(),
-            key_insert_mode: "i".to_string(),
-            key_nav_mode: "escape".to_string(),
+            key_toggle_mode: "escape".to_string(),
         }
     }
 }
@@ -56,19 +57,22 @@ impl VimNavConfig {
         let settings = Config::builder()
             .add_source(config::Environment::with_prefix("VIMNAV"))
             .add_source(File::with_name("vim_navigation_config").required(false));
-        
+
         // Try to load from config file, fall back to defaults
         match settings.build() {
-            Ok(config) => {
-                match config.try_deserialize() {
-                    Ok(config) => Ok(config),
-                    Err(_) => {
-                        println!("Using default configuration (config file not found or invalid)");
-                        Ok(Self::default())
-                    }
+            Ok(config) => match config.try_deserialize() {
+                Ok(loaded_config) => {
+                    println!("Loaded configuration from vim_navigation_config.toml");
+                    Ok(loaded_config)
+                }
+                Err(e) => {
+                    println!("Failed to parse config file: {}", e);
+                    println!("Using default configuration");
+                    Ok(Self::default())
                 }
             },
-            Err(_) => {
+            Err(e) => {
+                println!("Failed to build config: {}", e);
                 println!("Using default configuration");
                 Ok(Self::default())
             }
@@ -83,13 +87,20 @@ impl VimNavConfig {
             None => println!("Max speed: UNLIMITED"),
         }
         println!("Acceleration base: {:.1}", self.acceleration_base);
-        println!("Acceleration multiplier: {:.1}", self.acceleration_multiplier);
+        println!(
+            "Acceleration multiplier: {:.1}",
+            self.acceleration_multiplier
+        );
         println!("Update rate: {} ms", self.repeat_delay_ms);
         println!("Move delay: {} ms", self.move_delay_ms);
-        println!("Navigation keys: {} {} {} {} (left/down/up/right)", 
-            self.key_left, self.key_down, self.key_up, self.key_right);
-        println!("Control keys: {} (insert), {} (nav mode), {} (click)", 
-            self.key_insert_mode, self.key_nav_mode, self.key_click);
+        println!(
+            "Navigation keys: {} {} {} {} (left/down/up/right)",
+            self.key_left, self.key_down, self.key_up, self.key_right
+        );
+        println!(
+            "Control keys: {} (toggle mode), {} (click)",
+            self.key_toggle_mode, self.key_click
+        );
         println!();
     }
 
@@ -175,6 +186,7 @@ struct CursorState {
     current_speeds: HashMap<Key, f64>,
     // Modifier tracking
     shift_pressed: bool,
+    space_pressed: bool, // For precision mode (100x slower)
     // Configuration
     config: VimNavConfig,
 }
@@ -190,13 +202,15 @@ impl CursorState {
             pressed_keys: HashMap::new(),
             current_speeds: HashMap::new(),
             shift_pressed: false,
+            space_pressed: false,
             config,
         })
     }
 
     fn start_key_press(&mut self, key: Key) {
         self.pressed_keys.insert(key, Instant::now());
-        self.current_speeds.insert(key, self.config.initial_move_step);
+        self.current_speeds
+            .insert(key, self.config.initial_move_step);
     }
 
     fn stop_key_press(&mut self, key: Key) {
@@ -207,24 +221,30 @@ impl CursorState {
     fn update_speed(&mut self, key: Key) -> f64 {
         if let Some(start_time) = self.pressed_keys.get(&key) {
             let hold_duration = start_time.elapsed().as_secs_f64();
-            
+
             // Fixed acceleration formula that actually uses the multiplier
             // Formula: speed = initial_move_step + (acceleration_multiplier * acceleration_base ^ hold_duration)
             let exponential_factor = self.config.acceleration_base.powf(hold_duration);
-            let new_speed = self.config.initial_move_step + (self.config.acceleration_multiplier * exponential_factor);
-            
+            let mut new_speed = self.config.initial_move_step
+                + (self.config.acceleration_multiplier * exponential_factor);
+
+            // Apply precision mode (100x slower) when space is pressed
+            if self.space_pressed {
+                new_speed /= 10.0;
+            }
+
             // Debug output to see what's happening
             if hold_duration > 0.5 {
-                println!("DEBUG: hold_duration={:.2}s, exp_factor={:.2}, multiplier={:.1}, new_speed={:.2}", 
-                    hold_duration, exponential_factor, self.config.acceleration_multiplier, new_speed);
+                println!("DEBUG: hold_duration={:.2}s, exp_factor={:.2}, multiplier={:.1}, new_speed={:.2}, space_pressed={}", 
+                    hold_duration, exponential_factor, self.config.acceleration_multiplier, new_speed, self.space_pressed);
             }
-            
+
             // Apply max speed limit only if configured, otherwise unlimited
             let final_speed = match self.config.max_move_step {
                 Some(max) => new_speed.min(max),
                 None => new_speed, // TRULY UNLIMITED - no safety caps
             };
-            
+
             self.current_speeds.insert(key, final_speed);
             final_speed
         } else {
@@ -264,7 +284,7 @@ fn send_event(event_type: &EventType, config: &VimNavConfig) -> Result<(), Simul
             // Let the OS catch up (especially important on macOS)
             thread::sleep(delay);
             Ok(())
-        },
+        }
         Err(e) => {
             eprintln!("Failed to send event {:?}: {:?}", event_type, e);
             Err(e)
@@ -294,24 +314,48 @@ fn scroll(direction: &str, config: &VimNavConfig) -> Result<(), SimulateError> {
     match direction {
         "up" => {
             for _ in 0..scroll_amount {
-                send_event(&EventType::Wheel { delta_x: 0, delta_y: 120 }, config)?;
+                send_event(
+                    &EventType::Wheel {
+                        delta_x: 0,
+                        delta_y: 120,
+                    },
+                    config,
+                )?;
             }
-        },
+        }
         "down" => {
             for _ in 0..scroll_amount {
-                send_event(&EventType::Wheel { delta_x: 0, delta_y: -120 }, config)?;
+                send_event(
+                    &EventType::Wheel {
+                        delta_x: 0,
+                        delta_y: -120,
+                    },
+                    config,
+                )?;
             }
-        },
+        }
         "left" => {
             for _ in 0..scroll_amount {
-                send_event(&EventType::Wheel { delta_x: -120, delta_y: 0 }, config)?;
+                send_event(
+                    &EventType::Wheel {
+                        delta_x: -120,
+                        delta_y: 0,
+                    },
+                    config,
+                )?;
             }
-        },
+        }
         "right" => {
             for _ in 0..scroll_amount {
-                send_event(&EventType::Wheel { delta_x: 120, delta_y: 0 }, config)?;
+                send_event(
+                    &EventType::Wheel {
+                        delta_x: 120,
+                        delta_y: 0,
+                    },
+                    config,
+                )?;
             }
-        },
+        }
         _ => {}
     }
     Ok(())
@@ -321,7 +365,7 @@ fn main() -> Result<(), VimNavError> {
     // Load configuration
     let config = VimNavConfig::load()?;
     config.print_config();
-    
+
     println!("Vim-style navigation with configurable keys started!");
     println!();
     println!("=== CONTROLS ===");
@@ -331,10 +375,15 @@ fn main() -> Result<(), VimNavError> {
     println!("  {} - move cursor up", config.key_up);
     println!("  {} - move cursor right", config.key_right);
     println!("  {} - left mouse click", config.key_click);
-    println!("  {} - enter typing mode", config.key_insert_mode);
+    println!("  Shift+hjkl - scroll in respective directions");
+    println!("  Space+hjkl - precision mode (100x slower)");
+    println!("  {} - toggle to typing mode", config.key_toggle_mode);
     println!();
     println!("TYPING MODE:");
-    println!("  {} - return to vim navigation mode", config.key_nav_mode);
+    println!(
+        "  {} - toggle back to vim navigation mode",
+        config.key_toggle_mode
+    );
     println!("  (all other keys work normally for typing)");
     println!();
     println!("BOTH MODES:");
@@ -346,35 +395,43 @@ fn main() -> Result<(), VimNavError> {
 
     // Initialize cursor state with config
     let cursor_state = Arc::new(Mutex::new(CursorState::new(config.clone())?));
-    
+
     // Navigation enabled state - true = vim navigation, false = normal typing
     let navigation_enabled = Arc::new(Mutex::new(true));
-    
-    // Move cursor to initial position
+
+    // Move cursor to initial positionnew_speed
     move_cursor(&cursor_state)?;
     println!("Cursor initialized at center of screen");
 
     // Create a flag to control the movement thread
     let running = Arc::new(Mutex::new(true));
-    
+
     // Start continuous movement thread
     let cursor_state_movement = Arc::clone(&cursor_state);
     let running_movement = Arc::clone(&running);
     let navigation_enabled_movement = Arc::clone(&navigation_enabled);
     let config_clone = config.clone();
-    
+
     thread::spawn(move || {
         while *running_movement.lock().unwrap() {
             // Only move if navigation is enabled
             if *navigation_enabled_movement.lock().unwrap() {
                 let mut state = cursor_state_movement.lock().unwrap();
                 let mut moved = false;
-                
-                let left_key = config_clone.string_to_key(&config_clone.key_left).unwrap_or(Key::KeyH);
-                let down_key = config_clone.string_to_key(&config_clone.key_down).unwrap_or(Key::KeyJ);
-                let up_key = config_clone.string_to_key(&config_clone.key_up).unwrap_or(Key::KeyK);
-                let right_key = config_clone.string_to_key(&config_clone.key_right).unwrap_or(Key::KeyL);
-                
+
+                let left_key = config_clone
+                    .string_to_key(&config_clone.key_left)
+                    .unwrap_or(Key::KeyH);
+                let down_key = config_clone
+                    .string_to_key(&config_clone.key_down)
+                    .unwrap_or(Key::KeyJ);
+                let up_key = config_clone
+                    .string_to_key(&config_clone.key_up)
+                    .unwrap_or(Key::KeyK);
+                let right_key = config_clone
+                    .string_to_key(&config_clone.key_right)
+                    .unwrap_or(Key::KeyL);
+
                 if state.is_key_pressed(left_key) {
                     state.move_left(left_key);
                     moved = true;
@@ -391,7 +448,7 @@ fn main() -> Result<(), VimNavError> {
                     state.move_right(right_key);
                     moved = true;
                 }
-                
+
                 if moved {
                     drop(state); // Release the lock before calling move_cursor
                     if let Err(e) = move_cursor(&cursor_state_movement) {
@@ -399,7 +456,7 @@ fn main() -> Result<(), VimNavError> {
                     }
                 }
             }
-            
+
             thread::sleep(Duration::from_millis(config_clone.repeat_delay_ms));
         }
     });
@@ -408,47 +465,91 @@ fn main() -> Result<(), VimNavError> {
     let cursor_state_clone = Arc::clone(&cursor_state);
     let navigation_enabled_clone = Arc::clone(&navigation_enabled);
     let config_clone = config.clone();
-    
+
     let callback = move |event: Event| -> Option<Event> {
         let nav_enabled = *navigation_enabled_clone.lock().unwrap();
-        
+
         match event.event_type {
             EventType::KeyPress(key) => {
-                // Track shift state
+                // Track modifier states
                 if key == Key::ShiftLeft || key == Key::ShiftRight {
                     cursor_state_clone.lock().unwrap().shift_pressed = true;
                 }
-                
-                // Mode switching keys (work in both modes)
-                if key == config_clone.string_to_key(&config_clone.key_insert_mode).unwrap_or(Key::KeyI) && nav_enabled {
-                    *navigation_enabled_clone.lock().unwrap() = false;
-                    // Clear any pressed keys when entering typing mode
-                    cursor_state_clone.lock().unwrap().pressed_keys.clear();
-                    cursor_state_clone.lock().unwrap().current_speeds.clear();
-                    println!("TYPING MODE - navigation disabled");
+                if key == Key::Space {
+                    cursor_state_clone.lock().unwrap().space_pressed = true;
+                }
+
+                // Mode switching - single toggle key works in both modes
+                if key
+                    == config_clone
+                        .string_to_key(&config_clone.key_toggle_mode)
+                        .unwrap_or(Key::Escape)
+                {
+                    let mut nav_enabled_guard = navigation_enabled_clone.lock().unwrap();
+                    *nav_enabled_guard = !*nav_enabled_guard;
+                    if *nav_enabled_guard {
+                        println!("VIM NAVIGATION MODE - navigation enabled");
+                    } else {
+                        println!("TYPING MODE - navigation disabled");
+                        // Clear any pressed keys when entering typing mode
+                        cursor_state_clone.lock().unwrap().pressed_keys.clear();
+                        cursor_state_clone.lock().unwrap().current_speeds.clear();
+                    }
                     return None; // Block this key
-                } else if key == config_clone.string_to_key(&config_clone.key_nav_mode).unwrap_or(Key::Escape) && !nav_enabled {
-                    *navigation_enabled_clone.lock().unwrap() = true;
-                    println!("VIM NAVIGATION MODE - navigation enabled");
-                    return None; // Block this key
-                
+
                 // Navigation keys (only work in navigation mode)
-                } else if nav_enabled && (
-                    key == config_clone.string_to_key(&config_clone.key_left).unwrap_or(Key::KeyH) ||
-                    key == config_clone.string_to_key(&config_clone.key_down).unwrap_or(Key::KeyJ) ||
-                    key == config_clone.string_to_key(&config_clone.key_up).unwrap_or(Key::KeyK) ||
-                    key == config_clone.string_to_key(&config_clone.key_right).unwrap_or(Key::KeyL)
-                ) {
+                } else if nav_enabled
+                    && (key
+                        == config_clone
+                            .string_to_key(&config_clone.key_left)
+                            .unwrap_or(Key::KeyH)
+                        || key
+                            == config_clone
+                                .string_to_key(&config_clone.key_down)
+                                .unwrap_or(Key::KeyJ)
+                        || key
+                            == config_clone
+                                .string_to_key(&config_clone.key_up)
+                                .unwrap_or(Key::KeyK)
+                        || key
+                            == config_clone
+                                .string_to_key(&config_clone.key_right)
+                                .unwrap_or(Key::KeyL))
+                {
                     let shift_pressed = cursor_state_clone.lock().unwrap().shift_pressed;
-                    
+
                     if shift_pressed {
                         // Shift+hjkl = scroll
                         let scroll_dir = match key {
-                            k if k == config_clone.string_to_key(&config_clone.key_left).unwrap_or(Key::KeyH) => "left",
-                            k if k == config_clone.string_to_key(&config_clone.key_down).unwrap_or(Key::KeyJ) => "down", 
-                            k if k == config_clone.string_to_key(&config_clone.key_up).unwrap_or(Key::KeyK) => "up",
-                            k if k == config_clone.string_to_key(&config_clone.key_right).unwrap_or(Key::KeyL) => "right",
-                            _ => ""
+                            k if k
+                                == config_clone
+                                    .string_to_key(&config_clone.key_left)
+                                    .unwrap_or(Key::KeyH) =>
+                            {
+                                "left"
+                            }
+                            k if k
+                                == config_clone
+                                    .string_to_key(&config_clone.key_down)
+                                    .unwrap_or(Key::KeyJ) =>
+                            {
+                                "down"
+                            }
+                            k if k
+                                == config_clone
+                                    .string_to_key(&config_clone.key_up)
+                                    .unwrap_or(Key::KeyK) =>
+                            {
+                                "up"
+                            }
+                            k if k
+                                == config_clone
+                                    .string_to_key(&config_clone.key_right)
+                                    .unwrap_or(Key::KeyL) =>
+                            {
+                                "right"
+                            }
+                            _ => "",
                         };
                         if let Err(e) = scroll(scroll_dir, &config_clone) {
                             eprintln!("Failed to scroll: {:?}", e);
@@ -458,44 +559,73 @@ fn main() -> Result<(), VimNavError> {
                         cursor_state_clone.lock().unwrap().start_key_press(key);
                     }
                     return None; // Block this key from other apps
-                
+
                 // Mouse click (only works in navigation mode)
-                } else if nav_enabled && key == config_clone.string_to_key(&config_clone.key_click).unwrap_or(Key::Return) {
+                } else if nav_enabled
+                    && key
+                        == config_clone
+                            .string_to_key(&config_clone.key_click)
+                            .unwrap_or(Key::Return)
+                {
                     if let Err(e) = click_mouse(&config_clone) {
                         eprintln!("Failed to click mouse: {:?}", e);
                     }
                     return None; // Block this key
-                }
                 
+                // Block space key in navigation mode (used for precision mode)
+                } else if nav_enabled && key == Key::Space {
+                    return None; // Block space from reaching other apps
+                }
+
                 // In navigation mode, let other keys pass through
                 // In typing mode, let all keys pass through
                 Some(event)
-            },
+            }
             EventType::KeyRelease(key) => {
-                // Track shift state
+                // Track modifier states
                 if key == Key::ShiftLeft || key == Key::ShiftRight {
                     cursor_state_clone.lock().unwrap().shift_pressed = false;
                 }
-                
-                if nav_enabled && (
-                    key == config_clone.string_to_key(&config_clone.key_left).unwrap_or(Key::KeyH) ||
-                    key == config_clone.string_to_key(&config_clone.key_down).unwrap_or(Key::KeyJ) ||
-                    key == config_clone.string_to_key(&config_clone.key_up).unwrap_or(Key::KeyK) ||
-                    key == config_clone.string_to_key(&config_clone.key_right).unwrap_or(Key::KeyL)
-                ) {
+                if key == Key::Space {
+                    cursor_state_clone.lock().unwrap().space_pressed = false;
+                }
+
+                if nav_enabled
+                    && (key
+                        == config_clone
+                            .string_to_key(&config_clone.key_left)
+                            .unwrap_or(Key::KeyH)
+                        || key
+                            == config_clone
+                                .string_to_key(&config_clone.key_down)
+                                .unwrap_or(Key::KeyJ)
+                        || key
+                            == config_clone
+                                .string_to_key(&config_clone.key_up)
+                                .unwrap_or(Key::KeyK)
+                        || key
+                            == config_clone
+                                .string_to_key(&config_clone.key_right)
+                                .unwrap_or(Key::KeyL))
+                {
                     cursor_state_clone.lock().unwrap().stop_key_press(key);
                     return None; // Block this key release too
                 }
                 
+                // Block space key release in navigation mode
+                if nav_enabled && key == Key::Space {
+                    return None; // Block space release from reaching other apps
+                }
+
                 Some(event)
-            },
-            _ => Some(event) // Pass through other events
+            }
+            _ => Some(event), // Pass through other events
         }
     };
 
     // Start grabbing events (this will block keys from other apps)
     match grab(callback) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(error) => {
             eprintln!("Error grabbing events: {:?}", error);
             eprintln!("Note: On macOS, make sure the terminal has Accessibility permissions:");
@@ -507,3 +637,4 @@ fn main() -> Result<(), VimNavError> {
 
     Ok(())
 }
+
