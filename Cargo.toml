@@ -9,3 +9,6 @@ path = "vim_navigation.rs"
 
 [dependencies]
 rdev = { path = "../rdev" }
+config = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
