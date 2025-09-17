@@ -1,4 +1,4 @@
-use rdev::{listen, simulate, display_size, Event, EventType, Key, Button, SimulateError, DisplayError, ListenError};
+use rdev::{simulate, display_size, Event, EventType, Key, Button, SimulateError, DisplayError, GrabError, grab};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -121,7 +121,7 @@ impl VimNavConfig {
 #[allow(dead_code)]
 enum VimNavError {
     Display(DisplayError),
-    Listen(ListenError),
+    Grab(GrabError),
     Simulate(SimulateError),
     Config(ConfigError),
 }
@@ -130,7 +130,7 @@ impl std::fmt::Display for VimNavError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             VimNavError::Display(e) => write!(f, "Display error: {:?}", e),
-            VimNavError::Listen(e) => write!(f, "Listen error: {:?}", e),
+            VimNavError::Grab(e) => write!(f, "Grab error: {:?}", e),
             VimNavError::Simulate(e) => write!(f, "Simulate error: {:?}", e),
             VimNavError::Config(e) => write!(f, "Config error: {:?}", e),
         }
@@ -145,9 +145,9 @@ impl From<DisplayError> for VimNavError {
     }
 }
 
-impl From<ListenError> for VimNavError {
-    fn from(err: ListenError) -> Self {
-        VimNavError::Listen(err)
+impl From<GrabError> for VimNavError {
+    fn from(err: GrabError) -> Self {
+        VimNavError::Grab(err)
     }
 }
 
@@ -173,6 +173,8 @@ struct CursorState {
     // Acceleration tracking
     pressed_keys: HashMap<Key, Instant>,
     current_speeds: HashMap<Key, f64>,
+    // Modifier tracking
+    shift_pressed: bool,
     // Configuration
     config: VimNavConfig,
 }
@@ -187,6 +189,7 @@ impl CursorState {
             screen_height: h as f64,
             pressed_keys: HashMap::new(),
             current_speeds: HashMap::new(),
+            shift_pressed: false,
             config,
         })
     }
@@ -286,6 +289,34 @@ fn click_mouse(config: &VimNavConfig) -> Result<(), SimulateError> {
     Ok(())
 }
 
+fn scroll(direction: &str, config: &VimNavConfig) -> Result<(), SimulateError> {
+    let scroll_amount = 3; // Adjust scroll sensitivity
+    match direction {
+        "up" => {
+            for _ in 0..scroll_amount {
+                send_event(&EventType::Wheel { delta_x: 0, delta_y: 120 }, config)?;
+            }
+        },
+        "down" => {
+            for _ in 0..scroll_amount {
+                send_event(&EventType::Wheel { delta_x: 0, delta_y: -120 }, config)?;
+            }
+        },
+        "left" => {
+            for _ in 0..scroll_amount {
+                send_event(&EventType::Wheel { delta_x: -120, delta_y: 0 }, config)?;
+            }
+        },
+        "right" => {
+            for _ in 0..scroll_amount {
+                send_event(&EventType::Wheel { delta_x: 120, delta_y: 0 }, config)?;
+            }
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), VimNavError> {
     // Load configuration
     let config = VimNavConfig::load()?;
@@ -378,11 +409,16 @@ fn main() -> Result<(), VimNavError> {
     let navigation_enabled_clone = Arc::clone(&navigation_enabled);
     let config_clone = config.clone();
     
-    let callback = move |event: Event| {
+    let callback = move |event: Event| -> Option<Event> {
         let nav_enabled = *navigation_enabled_clone.lock().unwrap();
         
         match event.event_type {
             EventType::KeyPress(key) => {
+                // Track shift state
+                if key == Key::ShiftLeft || key == Key::ShiftRight {
+                    cursor_state_clone.lock().unwrap().shift_pressed = true;
+                }
+                
                 // Mode switching keys (work in both modes)
                 if key == config_clone.string_to_key(&config_clone.key_insert_mode).unwrap_or(Key::KeyI) && nav_enabled {
                     *navigation_enabled_clone.lock().unwrap() = false;
@@ -390,9 +426,11 @@ fn main() -> Result<(), VimNavError> {
                     cursor_state_clone.lock().unwrap().pressed_keys.clear();
                     cursor_state_clone.lock().unwrap().current_speeds.clear();
                     println!("TYPING MODE - navigation disabled");
+                    return None; // Block this key
                 } else if key == config_clone.string_to_key(&config_clone.key_nav_mode).unwrap_or(Key::Escape) && !nav_enabled {
                     *navigation_enabled_clone.lock().unwrap() = true;
                     println!("VIM NAVIGATION MODE - navigation enabled");
+                    return None; // Block this key
                 
                 // Navigation keys (only work in navigation mode)
                 } else if nav_enabled && (
@@ -401,17 +439,44 @@ fn main() -> Result<(), VimNavError> {
                     key == config_clone.string_to_key(&config_clone.key_up).unwrap_or(Key::KeyK) ||
                     key == config_clone.string_to_key(&config_clone.key_right).unwrap_or(Key::KeyL)
                 ) {
-                    cursor_state_clone.lock().unwrap().start_key_press(key);
+                    let shift_pressed = cursor_state_clone.lock().unwrap().shift_pressed;
+                    
+                    if shift_pressed {
+                        // Shift+hjkl = scroll
+                        let scroll_dir = match key {
+                            k if k == config_clone.string_to_key(&config_clone.key_left).unwrap_or(Key::KeyH) => "left",
+                            k if k == config_clone.string_to_key(&config_clone.key_down).unwrap_or(Key::KeyJ) => "down", 
+                            k if k == config_clone.string_to_key(&config_clone.key_up).unwrap_or(Key::KeyK) => "up",
+                            k if k == config_clone.string_to_key(&config_clone.key_right).unwrap_or(Key::KeyL) => "right",
+                            _ => ""
+                        };
+                        if let Err(e) = scroll(scroll_dir, &config_clone) {
+                            eprintln!("Failed to scroll: {:?}", e);
+                        }
+                    } else {
+                        // Normal hjkl = cursor movement
+                        cursor_state_clone.lock().unwrap().start_key_press(key);
+                    }
+                    return None; // Block this key from other apps
                 
                 // Mouse click (only works in navigation mode)
                 } else if nav_enabled && key == config_clone.string_to_key(&config_clone.key_click).unwrap_or(Key::Return) {
                     if let Err(e) = click_mouse(&config_clone) {
                         eprintln!("Failed to click mouse: {:?}", e);
                     }
+                    return None; // Block this key
                 }
-                // All other keys pass through normally when navigation is disabled
+                
+                // In navigation mode, let other keys pass through
+                // In typing mode, let all keys pass through
+                Some(event)
             },
             EventType::KeyRelease(key) => {
+                // Track shift state
+                if key == Key::ShiftLeft || key == Key::ShiftRight {
+                    cursor_state_clone.lock().unwrap().shift_pressed = false;
+                }
+                
                 if nav_enabled && (
                     key == config_clone.string_to_key(&config_clone.key_left).unwrap_or(Key::KeyH) ||
                     key == config_clone.string_to_key(&config_clone.key_down).unwrap_or(Key::KeyJ) ||
@@ -419,23 +484,24 @@ fn main() -> Result<(), VimNavError> {
                     key == config_clone.string_to_key(&config_clone.key_right).unwrap_or(Key::KeyL)
                 ) {
                     cursor_state_clone.lock().unwrap().stop_key_press(key);
+                    return None; // Block this key release too
                 }
+                
+                Some(event)
             },
-            _ => {
-                // Ignore other event types
-            }
+            _ => Some(event) // Pass through other events
         }
     };
 
-    // Start listening for events (this will block)
-    match listen(callback) {
+    // Start grabbing events (this will block keys from other apps)
+    match grab(callback) {
         Ok(()) => {},
         Err(error) => {
-            eprintln!("Error listening for events: {:?}", error);
+            eprintln!("Error grabbing events: {:?}", error);
             eprintln!("Note: On macOS, make sure the terminal has Accessibility permissions:");
             eprintln!("System Preferences > Security & Privacy > Privacy > Accessibility");
             *running.lock().unwrap() = false;
-            return Err(VimNavError::Listen(error));
+            return Err(VimNavError::Grab(error));
         }
     }
 

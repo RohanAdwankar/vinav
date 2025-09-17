@@ -1,5 +1,5 @@
-initial_move_step = 5.0
-acceleration_base = 5.0
+initial_move_step = 1.0
+acceleration_base = 2.0
 acceleration_multiplier = 50.0
 repeat_delay_ms = 30
 move_delay_ms = 15
