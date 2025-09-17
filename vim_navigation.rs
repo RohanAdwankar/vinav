@@ -33,6 +33,10 @@ struct VimNavConfig {
     pub key_right: String,
     pub key_click: String,
     pub key_toggle_mode: String, // Single key to toggle between nav/typing modes
+    pub key_right_click: String,
+    pub key_select_toggle: String,  // Toggle text selection mode
+    pub key_goto_top: String,       // Go to top of screen (gg equivalent)
+    pub key_goto_bottom: String,    // Go to bottom of screen (G equivalent)
 }
 
 impl Default for VimNavConfig {
@@ -51,6 +55,10 @@ impl Default for VimNavConfig {
             key_right: "l".to_string(),
             key_click: "return".to_string(),
             key_toggle_mode: "escape".to_string(),
+            key_right_click: "i".to_string(),
+            key_select_toggle: "v".to_string(),
+            key_goto_top: "g".to_string(),
+            key_goto_bottom: "shift_g".to_string(),
         }
     }
 }
@@ -125,6 +133,9 @@ impl VimNavConfig {
             "e" => Some(Key::KeyE),
             "r" => Some(Key::KeyR),
             "t" => Some(Key::KeyT),
+            "g" => Some(Key::KeyG),
+            "v" => Some(Key::KeyV),
+            "shift_g" => Some(Key::KeyG), // We'll handle shift detection separately
             "space" => Some(Key::Space),
             _ => None,
         }
@@ -191,6 +202,7 @@ struct CursorState {
     // Modifier tracking
     shift_pressed: bool,
     space_pressed: bool, // For precision mode (100x slower)
+    selection_active: bool, // For text selection mode
     // Configuration
     config: VimNavConfig,
 }
@@ -207,6 +219,7 @@ impl CursorState {
             current_speeds: HashMap::new(),
             shift_pressed: false,
             space_pressed: false,
+            selection_active: false,
             config,
         })
     }
@@ -365,6 +378,52 @@ fn scroll(direction: &str, config: &VimNavConfig) -> Result<(), SimulateError> {
     Ok(())
 }
 
+fn right_click_mouse(config: &VimNavConfig) -> Result<(), SimulateError> {
+    // Perform a right mouse click (press and release)
+    send_event(&EventType::ButtonPress(Button::Right), config)?;
+    send_event(&EventType::ButtonRelease(Button::Right), config)?;
+    println!("Right mouse clicked!");
+    Ok(())
+}
+
+fn toggle_selection(cursor_state: &Arc<Mutex<CursorState>>) -> Result<(), SimulateError> {
+    let mut state = cursor_state.lock().unwrap();
+    state.selection_active = !state.selection_active;
+    
+    if state.selection_active {
+        // Start selection by pressing left mouse button
+        simulate(&EventType::ButtonPress(Button::Left))?;
+        println!("Text selection started");
+    } else {
+        // End selection by releasing left mouse button
+        simulate(&EventType::ButtonRelease(Button::Left))?;
+        println!("Text selection ended");
+    }
+    Ok(())
+}
+
+fn goto_screen_edge(cursor_state: &Arc<Mutex<CursorState>>, go_to_top: bool) -> Result<(), SimulateError> {
+    let mut state = cursor_state.lock().unwrap();
+    if go_to_top {
+        state.y = 0.0;
+        println!("Moved to top of screen");
+    } else {
+        state.y = state.screen_height - 1.0;
+        println!("Moved to bottom of screen");
+    }
+    drop(state);
+    
+    // Actually move the cursor
+    let state = cursor_state.lock().unwrap();
+    let x = state.x;
+    let y = state.y;
+    let config = state.config.clone();
+    drop(state);
+    
+    send_event(&EventType::MouseMove { x, y }, &config)?;
+    Ok(())
+}
+
 fn main() -> Result<(), VimNavError> {
     // Load configuration
     let config = VimNavConfig::load()?;
@@ -379,6 +438,10 @@ fn main() -> Result<(), VimNavError> {
     println!("  {} - move cursor up", config.key_up);
     println!("  {} - move cursor right", config.key_right);
     println!("  {} - left mouse click", config.key_click);
+    println!("  {} - right mouse click", config.key_right_click);
+    println!("  {} - toggle text selection", config.key_select_toggle);
+    println!("  {} - go to top of screen", config.key_goto_top);
+    println!("  {} - go to bottom of screen", config.key_goto_bottom);
     println!("  Shift+hjkl - scroll in respective directions");
     println!("  Space+hjkl - precision mode ({:.0}x slower)", config.precision_divisor);
     println!("  {} - toggle to typing mode", config.key_toggle_mode);
@@ -573,6 +636,56 @@ fn main() -> Result<(), VimNavError> {
                 {
                     if let Err(e) = click_mouse(&config_clone) {
                         eprintln!("Failed to click mouse: {:?}", e);
+                    }
+                    return None; // Block this key
+                
+                // Right mouse click (only works in navigation mode)
+                } else if nav_enabled
+                    && key
+                        == config_clone
+                            .string_to_key(&config_clone.key_right_click)
+                            .unwrap_or(Key::KeyI)
+                {
+                    if let Err(e) = right_click_mouse(&config_clone) {
+                        eprintln!("Failed to right click mouse: {:?}", e);
+                    }
+                    return None; // Block this key
+                
+                // Toggle text selection (only works in navigation mode)
+                } else if nav_enabled
+                    && key
+                        == config_clone
+                            .string_to_key(&config_clone.key_select_toggle)
+                            .unwrap_or(Key::KeyV)
+                {
+                    if let Err(e) = toggle_selection(&cursor_state_clone) {
+                        eprintln!("Failed to toggle selection: {:?}", e);
+                    }
+                    return None; // Block this key
+                
+                // Go to top of screen (only works in navigation mode)
+                } else if nav_enabled
+                    && key
+                        == config_clone
+                            .string_to_key(&config_clone.key_goto_top)
+                            .unwrap_or(Key::KeyG)
+                    && !cursor_state_clone.lock().unwrap().shift_pressed // Plain G, not Shift+G
+                {
+                    if let Err(e) = goto_screen_edge(&cursor_state_clone, true) {
+                        eprintln!("Failed to go to top: {:?}", e);
+                    }
+                    return None; // Block this key
+                
+                // Go to bottom of screen (only works in navigation mode)
+                } else if nav_enabled
+                    && key
+                        == config_clone
+                            .string_to_key(&config_clone.key_goto_bottom)
+                            .unwrap_or(Key::KeyG)
+                    && cursor_state_clone.lock().unwrap().shift_pressed // Shift+G
+                {
+                    if let Err(e) = goto_screen_edge(&cursor_state_clone, false) {
+                        eprintln!("Failed to go to bottom: {:?}", e);
                     }
                     return None; // Block this key
                 
