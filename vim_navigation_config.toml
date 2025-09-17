@@ -3,6 +3,7 @@ acceleration_base = 2.0
 acceleration_multiplier = 50.0
 repeat_delay_ms = 20
 move_delay_ms = 15
+precision_divisor = 100.0
 
 # Navigation keys
 key_left = "h"

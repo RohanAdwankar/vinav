@@ -24,6 +24,8 @@ struct VimNavConfig {
     pub repeat_delay_ms: u64,
     /// Delay between OS events in milliseconds
     pub move_delay_ms: u64,
+    /// Precision mode divisor (how much slower when space is held)
+    pub precision_divisor: f64,
     /// Navigation keys
     pub key_left: String,
     pub key_down: String,
@@ -42,6 +44,7 @@ impl Default for VimNavConfig {
             acceleration_multiplier: 50.0, // Double the multiplier for faster acceleration
             repeat_delay_ms: 30,
             move_delay_ms: 15,
+            precision_divisor: 100.0,  // 100x slower by default
             key_left: "h".to_string(),
             key_down: "j".to_string(),
             key_up: "k".to_string(),
@@ -93,6 +96,7 @@ impl VimNavConfig {
         );
         println!("Update rate: {} ms", self.repeat_delay_ms);
         println!("Move delay: {} ms", self.move_delay_ms);
+        println!("Precision mode: {:.1}x slower", self.precision_divisor);
         println!(
             "Navigation keys: {} {} {} {} (left/down/up/right)",
             self.key_left, self.key_down, self.key_up, self.key_right
@@ -376,7 +380,7 @@ fn main() -> Result<(), VimNavError> {
     println!("  {} - move cursor right", config.key_right);
     println!("  {} - left mouse click", config.key_click);
     println!("  Shift+hjkl - scroll in respective directions");
-    println!("  Space+hjkl - precision mode (100x slower)");
+    println!("  Space+hjkl - precision mode ({:.0}x slower)", config.precision_divisor);
     println!("  {} - toggle to typing mode", config.key_toggle_mode);
     println!();
     println!("TYPING MODE:");
