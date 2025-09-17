@@ -37,6 +37,8 @@ struct VimNavConfig {
     pub key_select_toggle: String,  // Toggle text selection mode
     pub key_goto_top: String,       // Go to top of screen (gg equivalent)
     pub key_goto_bottom: String,    // Go to bottom of screen (G equivalent)
+    pub key_yank: String,           // Copy/yank (y key)
+    pub key_paste: String,          // Paste (p key)
 }
 
 impl Default for VimNavConfig {
@@ -59,6 +61,8 @@ impl Default for VimNavConfig {
             key_select_toggle: "v".to_string(),
             key_goto_top: "g".to_string(),
             key_goto_bottom: "shift_g".to_string(),
+            key_yank: "y".to_string(),
+            key_paste: "p".to_string(),
         }
     }
 }
@@ -135,6 +139,8 @@ impl VimNavConfig {
             "t" => Some(Key::KeyT),
             "g" => Some(Key::KeyG),
             "v" => Some(Key::KeyV),
+            "y" => Some(Key::KeyY),
+            "p" => Some(Key::KeyP),
             "shift_g" => Some(Key::KeyG), // We'll handle shift detection separately
             "space" => Some(Key::Space),
             _ => None,
@@ -424,6 +430,26 @@ fn goto_screen_edge(cursor_state: &Arc<Mutex<CursorState>>, go_to_top: bool) -> 
     Ok(())
 }
 
+fn yank_copy() -> Result<(), SimulateError> {
+    // Send Cmd+C (copy) on macOS
+    simulate(&EventType::KeyPress(Key::MetaLeft))?;
+    simulate(&EventType::KeyPress(Key::KeyC))?;
+    simulate(&EventType::KeyRelease(Key::KeyC))?;
+    simulate(&EventType::KeyRelease(Key::MetaLeft))?;
+    println!("Yanked (copied) to clipboard");
+    Ok(())
+}
+
+fn paste() -> Result<(), SimulateError> {
+    // Send Cmd+V (paste) on macOS
+    simulate(&EventType::KeyPress(Key::MetaLeft))?;
+    simulate(&EventType::KeyPress(Key::KeyV))?;
+    simulate(&EventType::KeyRelease(Key::KeyV))?;
+    simulate(&EventType::KeyRelease(Key::MetaLeft))?;
+    println!("Pasted from clipboard");
+    Ok(())
+}
+
 fn main() -> Result<(), VimNavError> {
     // Load configuration
     let config = VimNavConfig::load()?;
@@ -442,6 +468,8 @@ fn main() -> Result<(), VimNavError> {
     println!("  {} - toggle text selection", config.key_select_toggle);
     println!("  {} - go to top of screen", config.key_goto_top);
     println!("  {} - go to bottom of screen", config.key_goto_bottom);
+    println!("  {} - yank/copy", config.key_yank);
+    println!("  {} - paste", config.key_paste);
     println!("  Shift+hjkl - scroll in respective directions");
     println!("  Space+hjkl - precision mode ({:.0}x slower)", config.precision_divisor);
     println!("  {} - toggle to typing mode", config.key_toggle_mode);
@@ -686,6 +714,30 @@ fn main() -> Result<(), VimNavError> {
                 {
                     if let Err(e) = goto_screen_edge(&cursor_state_clone, false) {
                         eprintln!("Failed to go to bottom: {:?}", e);
+                    }
+                    return None; // Block this key
+                
+                // Yank/copy (only works in navigation mode)
+                } else if nav_enabled
+                    && key
+                        == config_clone
+                            .string_to_key(&config_clone.key_yank)
+                            .unwrap_or(Key::KeyY)
+                {
+                    if let Err(e) = yank_copy() {
+                        eprintln!("Failed to yank/copy: {:?}", e);
+                    }
+                    return None; // Block this key
+                
+                // Paste (only works in navigation mode)
+                } else if nav_enabled
+                    && key
+                        == config_clone
+                            .string_to_key(&config_clone.key_paste)
+                            .unwrap_or(Key::KeyP)
+                {
+                    if let Err(e) = paste() {
+                        eprintln!("Failed to paste: {:?}", e);
                     }
                     return None; // Block this key
                 
