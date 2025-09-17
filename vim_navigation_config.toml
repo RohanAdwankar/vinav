@@ -1,5 +1,16 @@
-initial_move_step = 1.0
+initial_move_step = 0.005
 acceleration_base = 2.0
 acceleration_multiplier = 50.0
-repeat_delay_ms = 30
+repeat_delay_ms = 20
 move_delay_ms = 15
+
+# Navigation keys
+key_left = "h"
+key_down = "j"
+key_up = "k"
+key_right = "l"
+
+# Control keys
+key_click = "return"
+key_insert_mode = "i"
+key_nav_mode = "escape"
