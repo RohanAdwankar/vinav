@@ -1,5 +1,7 @@
 # Vim Navigation with Toggle Mode & Persistent Configuration
 
+https://github.com/user-attachments/assets/629bc65a-8147-42c7-a04c-4d92480bd3f9
+
 Navigate your computer using vim-style keys (hjkl) to avoid using the mouse and staying on the homerow.
 
 ### Config File Setup
